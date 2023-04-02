@@ -1,0 +1,8 @@
+{
+    "serverBaseUrl": "https://cytu.be",
+    "username": "",
+    "password": "",
+    "room": "",
+    "roompassword": "",
+    "enableLogging": true
+}
