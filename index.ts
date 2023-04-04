@@ -1,9 +1,10 @@
 import axios from "axios";
-import config from './config.json';
+import util from 'util';
+import {customAlphabet} from 'nanoid/non-secure';
 import {io, Socket} from "socket.io-client";
 
+import config from './config.json';
 export type Config = typeof config;
-
 
 interface MoveVideoResponse {
     from: number;
@@ -33,34 +34,37 @@ interface Media {
     meta: any;
 }
 
+
 const RequestPlaylist =  "requestPlaylist";
 const Login =  "login";
 const InitChannelCallbacks =  "InitChannelCallbacks";
 
+interface MoveVideoResponse{
+    from: number,
+    after: number
+}
+interface MoveMediaData{
+    from: number,
+    after: number
+}
 
 interface Context {
     Config : Config,
     Socket : Socket,
     VideoQueue : PlaylistResponse,
-    UidToVideoIndexMap : Map<number, number>,
+    botSessionId: string
+    readyHandleMessages?: boolean // bot will handle chants until it sees its initialization message
+    loginSuccess: boolean,
+    moveVideoRefCounter : Map<string, true>
 }
 
-function emitPromise<T>(socket: Socket, event : string, ...args: any) : Promise<T> {
-    return new Promise((resolve, reject) => {
-        socket.emit(event, args, (data : T) => {
-            resolve(data);
-        });
-    });
+function logSocketEmit(event : string, data? : any) {
+    console.log(`Socket Emit | ${event} : ${util.inspect(data)}`);
 }
 
-function onPromise<T>(socket: Socket, event : string, ...args: any) : Promise<T> {
-    return new Promise((resolve, reject) => {
-        socket.on(event, (data : T) => {
-            resolve(data);
-        });
-    });
+function logSocketRecieve(event : string, data : any) {
+    console.log(`Socket Recieve | ${event} :  ${util.inspect(data)}`);
 }
-
 
 // Get the socket server from cytube server api
 async function getSecureServer(config : Config) : Promise<string> {
@@ -86,48 +90,67 @@ function validateConfiguration(config : Config) {
 }
 
 function onPlaylistCallback(context: Context, response: PlaylistResponse) {
-    console.log(`onPlayListCallback: ${response}`);
+    // wait until logged in to process playlist. For some reason, playlist is sent twice once before log in (in wrong order). and once after
+    if(!context.loginSuccess) {
+        return;
+    }
+
     context.VideoQueue = response;
-    context.UidToVideoIndexMap = new Map(context.VideoQueue.map((video, index) => [video.uid, index]))
     if( !(context.VideoQueue && context.VideoQueue.length > 0)) {
         return;
     }
+    context.moveVideoRefCounter = new Map();
     const sortedVideos = roundRobinSortVideos(context);
     sortCytube(context, sortedVideos)
 }
 
+function getInitString(context :Context) {
+    return `Hi. Initialized bot: ${context.botSessionId}`;
+}
+
+//todo: check if sent by admin
 function onChatMsgCallback(context: Context, response: { username: string, msg: string, meta: any, time: number }) {
-    console.log(`onChatMsgCallback: ${response}`);
+    if(!context.readyHandleMessages) {
+        if(response.msg === getInitString(context)) {
+            context.readyHandleMessages = true;
+        }
+        return;
+    }
     if (response.msg === `${config.username}: !sort`) {
         ForceSortVideoQueue(context);
     }
 }
 
 function onMoveVideoCallback(context : Context, response: MoveVideoResponse) {
-    console.log(`onMoveVideoCallback: ${response}`);
+    // skip if this is a move video response from this bot
+    const stringified = JSON.stringify(response);
+    const alreadyMoved = context.moveVideoRefCounter.get(stringified);
+    if(alreadyMoved) {
+        context.moveVideoRefCounter.delete(stringified);
+        return;
+    }
     const from = response.from;
     const after = response.after;
-    const fromIndex = context.UidToVideoIndexMap.get(from) as number;
-    const afterIndex = context.UidToVideoIndexMap.get(after) as number;
+    const fromIndex = context.VideoQueue.findIndex(video => video.uid === from);
     const video = context.VideoQueue[fromIndex];
     context.VideoQueue.splice(fromIndex, 1);
-    context.VideoQueue.splice(afterIndex, 0, video);
-    context.UidToVideoIndexMap = new Map(context.VideoQueue.map((video, index) => [video.uid, index]))
-}
+    const afterIndex = context.VideoQueue.findIndex(video => video.uid === after);
+    context.VideoQueue.splice(afterIndex+1, 0, video);
 
-function onDeleteCallback(context: Context , response: { uid: number }) {
-    console.log(`onDeleteCallback: ${response}`);
-    const uid = response.uid;
-    const deleteIndex = context.UidToVideoIndexMap.get(uid) as number;
-    const video = context.VideoQueue[deleteIndex];
-    context.VideoQueue.splice(deleteIndex, 1);
-    context.UidToVideoIndexMap = new Map(context.VideoQueue.map((video, index) => [video.uid, index]))
 
+    // sort after move
     const sortedVideos = roundRobinSortVideos(context);
     sortCytube(context, sortedVideos)
 }
 
-function onErrorMsg( response : { msg: string } ) {
+function onDeleteCallback(context: Context , response: { uid: number }) {
+    const deleteIndex = context.VideoQueue.findIndex(video => video.uid === response.uid);
+    context.VideoQueue.splice(deleteIndex, 1);
+    const sortedVideos = roundRobinSortVideos(context);
+    sortCytube(context, sortedVideos)
+}
+
+function onErrorMsg(context : Context, response : { msg: string } ) {
     const criticalErrors = [
         "Invalid channel name",
         "blocked anonymous users",
@@ -142,70 +165,176 @@ function onErrorMsg( response : { msg: string } ) {
     console.error(response.msg);
 }
 
-// partially applies context variable to callback?
-function withContext<T>(context : Context, callback : (context : Context, response : T) => void ) {
-    return (response : T) => callback(context, response);
-}
-
 function onQueueCallback(context: Context, response : QueueResponse) {
     if (response.after as string === "prepend") {
         context.VideoQueue.unshift(response.item);
     } else {
-        const index = context.UidToVideoIndexMap.get(response.after as number) as number;
+        const index = context.VideoQueue.findIndex(video => video.uid === response.after);
         context.VideoQueue.splice(index + 1, 0, response.item);
     }    
-    context.UidToVideoIndexMap = new Map(context.VideoQueue.map((video, index) => [video.uid, index]))
-
     const sortedVideos = roundRobinSortVideos(context);
     sortCytube(context, sortedVideos)
 }
+
+// adds logging and context logging to socket on
+function socketOnWithLoggingAndContext<T>(context : Context, event : string, callback : (context : Context, response :T) => void) {
+    const callbackWithLogging = (response : T) => {
+//        logSocketRecieve(event, response);
+        callback(context, response);
+    }
+    Object.defineProperty(callbackWithLogging, 'name', {value : callback.name, writable: false});
+    console.log(`socket.on handler {${callback.name}} added for event {${event}}`);
+    context.Socket.on(event, callbackWithLogging);
+}
+
+//add logging and context to socket emit
+function socketEmitWithLoggingAndContext<T extends Object>(context : Context, event : string, data? : T) {
+    logSocketEmit(event, data);
+    return context.Socket.emit(event, data);
+}
+
+// proxies emit call so that it is applied with context
+function getEmitProxy(context : Context): <T extends Object>(event : string, data? : T) => void {
+    return <T extends Object>(event : string, data? : T) => {
+        return socketEmitWithLoggingAndContext(context, event, data);
+    }
+}
+
+// proxies on call so that it is applied with context
+function getOnProxy(context : Context): <T>(event : string, callback : (context : Context, response : T) => void) => void {
+    return <T>(event : string, callback : (context : Context, response : T) => void) => {
+        socketOnWithLoggingAndContext(context, event, callback);
+    }
+}
+
+// TODO: handle much better. Definitely need to check permissions here
+// Seems like best place for sending messages and validating login.
+function onSetPermissionsCallback(context : Context, response : any) {
+    const emitProxy = getEmitProxy(context);
+}
+
+// todo handle
+//handle
+function onRankCallback(context : Context, response : any) {
+}
+
+// todo handle
+//handle
+function onLoginCallback(context : Context, response : {success : boolean, name : string}) {
+    if(response.success) {
+        context.loginSuccess = true;
+        const emitProxy = getEmitProxy(context);
+        emitProxy("chatMsg", { msg: getInitString(context) });
+    } else {
+        throw new Error().message = `Login failed: ${util.inspect(response.name)} `;
+    }
+}
+
 
 async function main() {
     validateConfiguration(config);
     const serverUrl = await getSecureServer(config);
     const socket = io(serverUrl);
+    
+    const botSeshId = customAlphabet('1234567890abcdef', 10)();
     const context : Context = {
         Config: config,
         VideoQueue: [],
-        UidToVideoIndexMap: new Map(),
         Socket: socket,
+        botSessionId: botSeshId,
+        loginSuccess: false,
+        moveVideoRefCounter: new Map<string, true>(),
     }
+    const emitProxy = getEmitProxy(context);
+    const onProxy = getOnProxy(context);
+    socket.onAny((event, ...args) => {
+        logSocketRecieve(event, args);
+    });
 
-    // handle recieving entire playlist. We will also sort the list here.
-    socket.on("playlist",  onPlaylistCallback.bind(undefined, context))
-    socket.on("chatMsg", onChatMsgCallback.bind(undefined, context))
-    socket.on("moveVideo", onMoveVideoCallback.bind(undefined, context));
-    socket.on("delete", onDeleteCallback.bind(undefined, context));
+    onProxy("login", onLoginCallback);
+    onProxy("playlist", onPlaylistCallback);
+    onProxy("setPermissions", onSetPermissionsCallback);
+    onProxy("rank", onRankCallback);
 
-    socket.on("queue", onQueueCallback.bind(undefined, context));
+    //handle chat messages seen by bot. Good place for chat commands
+    onProxy("chatMsg", onChatMsgCallback);
 
-    socket.emit(InitChannelCallbacks);
-    socket.emit("joinChannel", { name: context.Config.room });
+    //handle moving video
+    onProxy("moveVideo", onMoveVideoCallback);
 
-    socket.once("errorMsg", onErrorMsg);
+    //handle deleting video. Sort queue
+    onProxy("delete", onDeleteCallback);
 
-    // TODO: DETECT WHEN LOGIN IS INVALID. cytube does not seem to send an error msg
-    socket.emit("login", { name: context.Config.username, pw: context.Config.password});
+    //handle adding to queue. sort queue
+    onProxy("queue", onQueueCallback);
+
+    emitProxy(InitChannelCallbacks);
+    emitProxy("joinChannel", { name: context.Config.room });
+    onProxy("errorMsg", onErrorMsg);
+
+    emitProxy("login", { name: context.Config.username, pw: context.Config.password});
 }
 
 
 
+// should perform the minimal amount of move commands to alter queue to sorted queue
+// maybe this is edit distance?
 function sortCytube(context: Context, sortedPlaylistOriginal: PlaylistItem[] ) {
+
+    const emitProxy = getEmitProxy(context);
+
     //copy so it is not overwritten while moving videos
     const sortedPlaylist = [...sortedPlaylistOriginal];
-    let current = sortedPlaylist.shift() as PlaylistItem;
-    for (const video of sortedPlaylist) {
-        if (video.uid !== current.uid) {
-            context.Socket.emit("moveMedia", { uid: video.uid, after: current.uid});
+    const toSortPlaylist = [...context.VideoQueue];
+
+    /*
+    const sortedUidToIndex = new Map<number, number>();
+    sortedPlaylist.forEach((video, index) => sortedUidToIndex.set(video.uid, index));
+
+    const sortedUidToPrevSortedUid = new Map<number, number>();
+    sortedPlaylist.forEach((video, index) => {
+        if(index > 0) {
+            sortedUidToPrevSortedUid.set(video.uid, sortedPlaylist[index - 1].uid)
         }
-        current = video;
+    });
+    */
+    let prevSortedUid  = -1;
+    for(let i = 0; i < sortedPlaylist.length; i++) {
+        const sortedUid = sortedPlaylist[i].uid;
+        const toSortUid = toSortPlaylist[i].uid;
+        if( prevSortedUid != -1 && sortedUid != toSortUid) {
+            const data = { from: sortedUid, after: prevSortedUid };
+            context.moveVideoRefCounter.set( JSON.stringify(data), true );
+            emitProxy("moveMedia", data);
+            
+            const videoIndexToMove = toSortPlaylist.findIndex(video => video.uid === sortedUid);
+            const videoToMove = toSortPlaylist.splice(videoIndexToMove, 1)[0];
+            toSortPlaylist.splice(i, 0, videoToMove);
+        }
+        prevSortedUid = sortedUid;
     }
+
+    /*
+    let current = sortedPlaylist.shift() as PlaylistItem;
+    let prev = null;
+    for (const video of context.VideoQueue) {
+        if (prev != null && video.uid !== current.uid) {
+            const data = { from: video.uid, after: prev.uid };
+            context.moveVideoRefCounter.set( JSON.stringify(data), true );
+            emitProxy("moveMedia", data);
+        }
+        prev = current;
+        current = sortedPlaylist.shift() as PlaylistItem;
+    }
+    */
+    context.VideoQueue = [...sortedPlaylistOriginal];
 }
 
 
 function ForceSortVideoQueue(context: Context) {
+    const emitProxy = getEmitProxy(context);
     // will triger OnPlaylistCallback which will sort the queue
-    context.Socket.emit(RequestPlaylist);
+    emitProxy(RequestPlaylist);
 }
 
 // should sort videos in a round robin fashion
@@ -215,10 +344,8 @@ function roundRobinSortVideos(context: Context) : PlaylistItem[] {
     context.VideoQueue.forEach(video => userToVideoListMap.set(video.queueby, []));
     context.VideoQueue.forEach(video => userToVideoListMap.get(video.queueby)!.push(video));
 
-    // get max number of videos in any user's queue.
-    // TODO: FIX BROKEN IMPLEMENTATION
     const maxVideos = Math.max(...[...userToVideoListMap.values()].map(v => v.length));
-    const userNames = userToVideoListMap.keys(); 
+    const userNames = [...userToVideoListMap.keys()]; //required since iterators cant be loopd multiple times??
     const sorted : PlaylistItem[] = [];
 
     for (let _ = 0; _ < maxVideos; _++) {
