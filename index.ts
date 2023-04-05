@@ -1,6 +1,5 @@
 import axios from "axios";
 import util from 'util';
-import {customAlphabet} from 'nanoid/non-secure';
 import {io, Socket} from "socket.io-client";
 
 import config from './config.json';
@@ -53,7 +52,7 @@ interface Context {
     Socket : Socket,
     VideoQueue : PlaylistResponse,
     botSessionId: string
-    readyHandleMessages?: boolean // bot will handle chants until it sees its initialization message
+    readyHandleMessages?: boolean // bot will ignore previous chat messages before it sees its initialization message (with botSessionId). Used to prevent bot from responding to old messages
     loginSuccess: boolean,
     moveVideoRefCounter : Map<string, true>
 }
@@ -218,8 +217,7 @@ function onSetPermissionsCallback(context : Context, response : any) {
 function onRankCallback(context : Context, response : any) {
 }
 
-// todo handle
-//handle
+//determine if login was successful
 function onLoginCallback(context : Context, response : {success : boolean, name : string}) {
     if(response.success) {
         context.loginSuccess = true;
@@ -230,13 +228,18 @@ function onLoginCallback(context : Context, response : {success : boolean, name 
     }
 }
 
+function onDisconnectCallback(context : Context, response : any) {
+    console.log("Disconnected from server");
+    process.exit(1);
+}
+
 
 async function main() {
     validateConfiguration(config);
     const serverUrl = await getSecureServer(config);
     const socket = io(serverUrl);
     
-    const botSeshId = customAlphabet('1234567890abcdef', 10)();
+    const botSeshId = Math.random().toString();
     const context : Context = {
         Config: config,
         VideoQueue: [],
@@ -247,9 +250,12 @@ async function main() {
     }
     const emitProxy = getEmitProxy(context);
     const onProxy = getOnProxy(context);
+
+    //for debugging, just log any received socket
     socket.onAny((event, ...args) => {
         logSocketRecieve(event, args);
     });
+
 
     onProxy("login", onLoginCallback);
     onProxy("playlist", onPlaylistCallback);
@@ -267,6 +273,8 @@ async function main() {
 
     //handle adding to queue. sort queue
     onProxy("queue", onQueueCallback);
+
+    onProxy("disconnect", onDisconnectCallback);
 
     emitProxy(InitChannelCallbacks);
     emitProxy("joinChannel", { name: context.Config.room });
@@ -287,17 +295,6 @@ function sortCytube(context: Context, sortedPlaylistOriginal: PlaylistItem[] ) {
     const sortedPlaylist = [...sortedPlaylistOriginal];
     const toSortPlaylist = [...context.VideoQueue];
 
-    /*
-    const sortedUidToIndex = new Map<number, number>();
-    sortedPlaylist.forEach((video, index) => sortedUidToIndex.set(video.uid, index));
-
-    const sortedUidToPrevSortedUid = new Map<number, number>();
-    sortedPlaylist.forEach((video, index) => {
-        if(index > 0) {
-            sortedUidToPrevSortedUid.set(video.uid, sortedPlaylist[index - 1].uid)
-        }
-    });
-    */
     let prevSortedUid  = -1;
     for(let i = 0; i < sortedPlaylist.length; i++) {
         const sortedUid = sortedPlaylist[i].uid;
@@ -314,19 +311,6 @@ function sortCytube(context: Context, sortedPlaylistOriginal: PlaylistItem[] ) {
         prevSortedUid = sortedUid;
     }
 
-    /*
-    let current = sortedPlaylist.shift() as PlaylistItem;
-    let prev = null;
-    for (const video of context.VideoQueue) {
-        if (prev != null && video.uid !== current.uid) {
-            const data = { from: video.uid, after: prev.uid };
-            context.moveVideoRefCounter.set( JSON.stringify(data), true );
-            emitProxy("moveMedia", data);
-        }
-        prev = current;
-        current = sortedPlaylist.shift() as PlaylistItem;
-    }
-    */
     context.VideoQueue = [...sortedPlaylistOriginal];
 }
 
