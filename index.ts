@@ -55,6 +55,7 @@ interface Context {
     readyHandleMessages?: boolean // bot will ignore previous chat messages before it sees its initialization message (with botSessionId). Used to prevent bot from responding to old messages
     loginSuccess: boolean,
     moveVideoRefCounter : Map<string, true>
+    isAutoSortEnabled: boolean
 }
 
 function logSocketEmit(event : string, data? : any) {
@@ -247,6 +248,7 @@ async function main() {
         botSessionId: botSeshId,
         loginSuccess: false,
         moveVideoRefCounter: new Map<string, true>(),
+        isAutoSortEnabled: true
     }
     const emitProxy = getEmitProxy(context);
     const onProxy = getOnProxy(context);
