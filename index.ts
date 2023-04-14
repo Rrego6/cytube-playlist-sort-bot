@@ -108,6 +108,20 @@ function getInitString(context :Context) {
     return `Hi. Initialized bot: ${context.botSessionId}`;
 }
 
+interface Command {
+    name: string,
+    description: string,
+    callback: (context: Context, response: any) => void
+}
+
+function getCommands() {
+    return [
+        "!sort - sort the video queue",
+        "!sort off - disable auto sort",
+        "!sort on - enable auto sort"
+    ]
+}
+
 //todo: check if sent by admin
 function onChatMsgCallback(context: Context, response: { username: string, msg: string, meta: any, time: number }) {
     if(!context.readyHandleMessages) {
@@ -116,8 +130,16 @@ function onChatMsgCallback(context: Context, response: { username: string, msg: 
         }
         return;
     }
+
     if (response.msg === `${config.username}: !sort`) {
         ForceSortVideoQueue(context);
+        return;
+    }
+    if (response.msg === `${config.username}: !sort off`) {
+        context.isAutoSortEnabled = false;
+    }
+    if (response.msg === `${config.username}: !sort off`) {
+        context.isAutoSortEnabled = false;
     }
 }
 
