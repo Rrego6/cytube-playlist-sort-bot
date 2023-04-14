@@ -4,6 +4,7 @@
     "password": "",
     "room": "",
     "roompassword": "",
-    "enableLogging": true
+    "enableLogging": true,
+    "inactivityTimeoutMinutes": 10,
     "minUserRankForPrivilegedCommands": 2
 }
