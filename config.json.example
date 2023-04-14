@@ -5,4 +5,5 @@
     "room": "",
     "roompassword": "",
     "enableLogging": true
+    "minUserRankForPrivledgedCommands": 2
 }

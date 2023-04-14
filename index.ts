@@ -1,9 +1,50 @@
 import axios from "axios";
 import util from 'util';
+import fs from "fs";
 import {io, Socket} from "socket.io-client";
+import { env, exit } from "process";
 
-import config from './config.json';
-export type Config = typeof config;
+const DEFAULT_ACCEPT_COMMANDS_AT_USER_RANK_LEVEL = 2;
+
+function readBotSettings() : Config {
+
+    let config : Config = new Object as Config;
+    if(fs.existsSync("./config.json")) {
+        //read config.json into object
+        const fileContents = fs.readFileSync("./config.json");
+        config = JSON.parse(fileContents.toString()) as Config;
+    }
+
+    const env_prefix = process.env.CYTUBE_BOT_ENV_PREFIX || "";
+    const env_username : string | undefined = process.env[env_prefix + "username"];
+    const env_base_url : string | undefined = process.env[env_prefix + "serverBaseUrl"];
+    const env_password : string | undefined = process.env[env_prefix + "password"];
+    const env_room_password : string | undefined = process.env[env_prefix + "roomPassword"];
+    const env_room : string | undefined = process.env[env_prefix + "room"];
+    const env_acceptcommandslevel : string | undefined = process.env[env_prefix + "minUserRankForPrivledgedCommands"];
+    const env_enableLogging : boolean = process.env[env_prefix + "ENABLE_LOGGING"] === "true";
+
+    config.serverBaseUrl = config.serverBaseUrl || env_base_url || "";
+    config.username =  config.username || env_username || "";
+    config.password = config.password || env_password || "";
+    config.roomPassword = config.roomPassword || env_room_password || "";
+    config.room = config.room || env_room || "";
+    config.enableLogging = config.enableLogging || env_enableLogging;
+    config.minUserRankForPrivledgedCommands = config.minUserRankForPrivledgedCommands || (env_acceptcommandslevel && parseInt(env_acceptcommandslevel)) || DEFAULT_ACCEPT_COMMANDS_AT_USER_RANK_LEVEL;
+
+    return config;
+}
+
+interface Config 
+{
+    serverBaseUrl:string
+    username: string,
+    password: string,
+    room: string,
+    roomPassword: string,
+    enableLogging: boolean
+    minUserRankForPrivledgedCommands: number
+}
 
 interface MoveVideoResponse {
     from: number;
@@ -14,6 +55,16 @@ interface QueueResponse {
     item : PlaylistItem,
     after: string | number
 }
+
+enum Rank {
+    Guest = 0,
+    Member =  1,
+    Leader = 1.5,
+    Moderator = 2,
+    Admin = 3,
+    Owner = 10,
+    Siteadmin =  255
+};
 
 interface PlaylistItem {
     media: Media;
@@ -32,7 +83,6 @@ interface Media {
     type: string;
     meta: any;
 }
-
 
 const RequestPlaylist =  "requestPlaylist";
 const Login =  "login";
@@ -56,7 +106,9 @@ interface Context {
     loginSuccess: boolean,
     moveVideoRefCounter : Map<string, true>
     isAutoSortEnabled: boolean
+    userRankMap: Map<string, Rank>
 }
+
 
 function logSocketEmit(event : string, data? : any) {
     console.log(`Socket Emit | ${event} : ${util.inspect(data)}`);
@@ -74,8 +126,11 @@ async function getSecureServer(config : Config) : Promise<string> {
     return serverList.servers.find(server => server.secure === true)!.url;
 }
 
+
+
 //check if config.cytubeServer is valid url 
 function validateConfiguration(config : Config) {
+
     try{
         new URL(config.serverBaseUrl);
         if(config.username === "" || config.password === "") {
@@ -110,20 +165,70 @@ function getInitString(context :Context) {
 
 interface Command {
     name: string,
+    requiresPrivledge: boolean,
     description: string,
-    callback: (context: Context, response: any) => void
+    commandImpl?: (context: Context, response: ChatMsgResponse) => void | undefined
 }
 
-function getCommands() {
-    return [
-        "!sort - sort the video queue",
-        "!sort off - disable auto sort",
-        "!sort on - enable auto sort"
-    ]
+const commands: Command[] =
+    [
+        {
+            name: "!help",
+            requiresPrivledge: false,
+            description: "Prints these commands"
+        },
+        {
+            name: "!sort",
+            requiresPrivledge: true,
+            description: "Forcibly sort the video queue",
+            commandImpl: (context: Context, response: ChatMsgResponse) => { ForceSortVideoQueue(context) }
+        },
+        {
+            name: "!autoSort off",
+            requiresPrivledge: true,
+            description: "Turns autosorting off",
+            commandImpl: (context: Context, response: ChatMsgResponse) => {
+                context.isAutoSortEnabled = false;
+                getEmitProxy(context)("chatMsg", { msg: "Auto sorting turned off" });
+            }
+        },
+        {
+            name: "!autoSort off",
+            requiresPrivledge: true,
+            description: "turns autosorting on",
+            commandImpl: (context: Context, response: ChatMsgResponse) => {
+                context.isAutoSortEnabled = true;
+                getEmitProxy(context)("chatMsg", { msg: "Auto sorting turned on" });
+            }
+        },
+        {
+            name: "!die",
+            requiresPrivledge: true,
+            description: "kills the bot",
+            commandImpl: (context: Context, response: ChatMsgResponse) => {
+                getEmitProxy(context)("chatMsg", { msg: "Goodbye cruel world" });
+                exit(0);
+            }
+        },
+    ];
+
+
+// should bot accept commands from user
+function isUserPrivledged(username : string, context : Context) : boolean {
+    if(username === context.Config.username) {
+        return false;
+    }
+    return (context.userRankMap.get(username) || 0 ) >= context.Config.minUserRankForPrivledgedCommands;
 }
 
-//todo: check if sent by admin
-function onChatMsgCallback(context: Context, response: { username: string, msg: string, meta: any, time: number }) {
+type ChatMsgResponse = {
+    username: string;
+    msg: string;
+    meta: any;
+    time: number;
+};
+
+function onChatMsgCallback(context: Context, response: ChatMsgResponse) {
     if(!context.readyHandleMessages) {
         if(response.msg === getInitString(context)) {
             context.readyHandleMessages = true;
@@ -131,21 +236,63 @@ function onChatMsgCallback(context: Context, response: { username: string, msg: 
         return;
     }
 
-    if (response.msg === `${config.username}: !sort`) {
-        ForceSortVideoQueue(context);
+    if(!response.msg) {
         return;
     }
-    if (response.msg === `${config.username}: !sort off`) {
-        context.isAutoSortEnabled = false;
+
+    const message = response.msg.trim();
+
+    //should handle by bot
+    if(!message.startsWith(`${context.Config.username}:`)) {
+        return;
     }
-    if (response.msg === `${config.username}: !sort off`) {
-        context.isAutoSortEnabled = false;
+
+    //get string after botname:
+    const commandMsgPart = message.substring(context.Config.username.length + 1).trim();
+
+    const commandsMap = new Map<string, Command>();
+    commands.forEach(command => commandsMap.set(command.name.toLocaleLowerCase().trim(), command));
+
+    const isUserPrivledgedVal = isUserPrivledged(response.username, context);
+    const command = commandsMap.get(commandMsgPart);
+
+    if(command) {
+        if( !command.requiresPrivledge || isUserPrivledgedVal) {
+            if(command.name === "!help") {
+                printHelpCommand(context, commands)
+                return;
+            }else {
+                command.commandImpl!(context, response);
+                return;
+            }
+        }
+    } else {
+        if(isUserPrivledgedVal) {
+            sendChatMessage(context, `Command not found: \`${commandMsgPart}\``);
+            printHelpCommand(context, commands);
+        }
     }
 }
 
+function sendChatMessage(context: Context, msg : string) {
+    getEmitProxy(context)("chatMsg", { msg: msg })
+}
+
+function printHelpCommand(context: Context, commands : Command[]) {
+    const msgHeader = "`command` | description | privledged";
+    const commandStrings = commands.map(command => {
+        return `\`${context.Config.username}: ${command.name}\` | ${command.description} | ${command.requiresPrivledge}`;
+    });
+    const msg = ["", msgHeader, ...commandStrings].join("\n");
+    sendChatMessage(context, msg);
+}
+
 function onMoveVideoCallback(context : Context, response: MoveVideoResponse) {
-    // skip if this is a move video response from this bot
+    if(!context.isAutoSortEnabled) {
+        return;
+    }
     const stringified = JSON.stringify(response);
+    // skip if this is a move video response from this bot
     const alreadyMoved = context.moveVideoRefCounter.get(stringified);
     if(alreadyMoved) {
         context.moveVideoRefCounter.delete(stringified);
@@ -159,13 +306,15 @@ function onMoveVideoCallback(context : Context, response: MoveVideoResponse) {
     const afterIndex = context.VideoQueue.findIndex(video => video.uid === after);
     context.VideoQueue.splice(afterIndex+1, 0, video);
 
-
     // sort after move
     const sortedVideos = roundRobinSortVideos(context);
     sortCytube(context, sortedVideos)
 }
 
 function onDeleteCallback(context: Context , response: { uid: number }) {
+    if(!context.isAutoSortEnabled) {
+        return
+    }
     const deleteIndex = context.VideoQueue.findIndex(video => video.uid === response.uid);
     context.VideoQueue.splice(deleteIndex, 1);
     const sortedVideos = roundRobinSortVideos(context);
@@ -240,6 +389,21 @@ function onSetPermissionsCallback(context : Context, response : any) {
 function onRankCallback(context : Context, response : any) {
 }
 
+function onSetUserRank(context : Context, response: { name: string, rank: number, meta : any, profile : any }) {
+    context.userRankMap.set(response.name, response.rank);
+}
+
+
+function onUserlistCallback(context: Context, response : {name: string, rank: number, profile: any, meta: any}[]) {
+    const rankMap = new Map<string, Rank>();
+    response.forEach(user => {
+        rankMap.set(user.name, user.rank);
+    });
+    context.userRankMap = rankMap;
+}
+
+
+
 //determine if login was successful
 function onLoginCallback(context : Context, response : {success : boolean, name : string}) {
     if(response.success) {
@@ -257,8 +421,12 @@ function onDisconnectCallback(context : Context, response : any) {
 }
 
 
+
+
 async function main() {
+    const config = readBotSettings();
     validateConfiguration(config);
+
     const serverUrl = await getSecureServer(config);
     const socket = io(serverUrl);
     
@@ -270,7 +438,8 @@ async function main() {
         botSessionId: botSeshId,
         loginSuccess: false,
         moveVideoRefCounter: new Map<string, true>(),
-        isAutoSortEnabled: true
+        isAutoSortEnabled: true,
+        userRankMap : new Map<string, number>()
     }
     const emitProxy = getEmitProxy(context);
     const onProxy = getOnProxy(context);
@@ -279,7 +448,6 @@ async function main() {
     socket.onAny((event, ...args) => {
         logSocketRecieve(event, args);
     });
-
 
     onProxy("login", onLoginCallback);
     onProxy("playlist", onPlaylistCallback);
@@ -299,6 +467,9 @@ async function main() {
     onProxy("queue", onQueueCallback);
 
     onProxy("disconnect", onDisconnectCallback);
+
+    onProxy("userlist", onUserlistCallback);
+    onProxy("setUserRank", onSetUserRank);
 
     emitProxy(InitChannelCallbacks);
     emitProxy("joinChannel", { name: context.Config.room });
@@ -325,7 +496,11 @@ function sortCytube(context: Context, sortedPlaylistOriginal: PlaylistItem[] ) {
         const toSortUid = toSortPlaylist[i].uid;
         if( prevSortedUid != -1 && sortedUid != toSortUid) {
             const data = { from: sortedUid, after: prevSortedUid };
-            context.moveVideoRefCounter.set( JSON.stringify(data), true );
+            
+            // prevent moveVideo callback after bot emits moveMedia. Dont store ref if autosort is disabled
+            if(context.isAutoSortEnabled) {
+                context.moveVideoRefCounter.set( JSON.stringify(data), true );
+            }
             emitProxy("moveMedia", data);
             
             const videoIndexToMove = toSortPlaylist.findIndex(video => video.uid === sortedUid);
