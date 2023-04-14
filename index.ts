@@ -21,7 +21,7 @@ function readBotSettings() : Config {
     const env_password : string | undefined = process.env[env_prefix + "password"];
     const env_room_password : string | undefined = process.env[env_prefix + "roomPassword"];
     const env_room : string | undefined = process.env[env_prefix + "room"];
-    const env_acceptcommandslevel : string | undefined = process.env[env_prefix + "minUserRankForPriviledgedCommands"];
+    const env_acceptcommandslevel : string | undefined = process.env[env_prefix + "minUserRankForPrivilegedCommands"];
     const env_enableLogging : boolean = process.env[env_prefix + "ENABLE_LOGGING"] === "true";
 
     config.serverBaseUrl = config.serverBaseUrl || env_base_url || "";
@@ -30,7 +30,7 @@ function readBotSettings() : Config {
     config.roomPassword = config.roomPassword || env_room_password || "";
     config.room = config.room || env_room || "";
     config.enableLogging = config.enableLogging || env_enableLogging;
-    config.minUserRankForPriviledgedCommands = config.minUserRankForPriviledgedCommands || (env_acceptcommandslevel && parseInt(env_acceptcommandslevel)) || DEFAULT_ACCEPT_COMMANDS_AT_USER_RANK_LEVEL;
+    config.minUserRankForPrivilegedCommands = config.minUserRankForPrivilegedCommands || (env_acceptcommandslevel && parseInt(env_acceptcommandslevel)) || DEFAULT_ACCEPT_COMMANDS_AT_USER_RANK_LEVEL;
 
     return config;
 }
@@ -43,7 +43,7 @@ interface Config
     room: string,
     roomPassword: string,
     enableLogging: boolean
-    minUserRankForPriviledgedCommands: number
+    minUserRankForPrivilegedCommands: number
 }
 
 interface MoveVideoResponse {
@@ -214,11 +214,11 @@ const commands: Command[] =
 
 
 // should bot accept commands from user
-function isUserPriviledged(username : string, context : Context) : boolean {
+function isUserPrivileged(username : string, context : Context) : boolean {
     if(username === context.Config.username) {
         return false;
     }
-    return (context.userRankMap.get(username) || 0 ) >= context.Config.minUserRankForPriviledgedCommands;
+    return (context.userRankMap.get(username) || 0 ) >= context.Config.minUserRankForPrivilegedCommands;
 }
 
 type ChatMsgResponse = {
@@ -253,11 +253,11 @@ function onChatMsgCallback(context: Context, response: ChatMsgResponse) {
     const commandsMap = new Map<string, Command>();
     commands.forEach(command => commandsMap.set(command.name.toLocaleLowerCase().trim(), command));
 
-    const isUserPriviledgedVal = isUserPriviledged(response.username, context);
+    const isUserPrivilegedVal = isUserPrivileged(response.username, context);
     const command = commandsMap.get(commandMsgPart);
 
     if(command) {
-        if( !command.requiresPrivledge || isUserPriviledgedVal) {
+        if( !command.requiresPrivledge || isUserPrivilegedVal) {
             if(command.name === "!help") {
                 printHelpCommand(context, commands)
                 return;
@@ -267,7 +267,7 @@ function onChatMsgCallback(context: Context, response: ChatMsgResponse) {
             }
         }
     } else {
-        if(isUserPriviledgedVal) {
+        if(isUserPrivilegedVal) {
             sendChatMessage(context, `Command not found: \`${commandMsgPart}\``);
             printHelpCommand(context, commands);
         }
@@ -279,7 +279,7 @@ function sendChatMessage(context: Context, msg : string) {
 }
 
 function printHelpCommand(context: Context, commands : Command[]) {
-    const msgHeader = "`command` | description | priviledged";
+    const msgHeader = "`command` | description | privileged";
     const commandStrings = commands.map(command => {
         return `\`${context.Config.username}: ${command.name}\` | ${command.description} | ${command.requiresPrivledge}`;
     });
