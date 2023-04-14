@@ -2,9 +2,10 @@ import axios from "axios";
 import util from 'util';
 import fs from "fs";
 import {io, Socket} from "socket.io-client";
-import { env, exit } from "process";
+import { env, exit, kill } from "process";
 
 const DEFAULT_ACCEPT_COMMANDS_AT_USER_RANK_LEVEL = 2;
+const DEFAULT_INACTIVITY_TIMEOUT = 10;
 
 function readBotSettings() : Config {
 
@@ -22,7 +23,8 @@ function readBotSettings() : Config {
     const env_room_password : string | undefined = process.env[env_prefix + "roomPassword"];
     const env_room : string | undefined = process.env[env_prefix + "room"];
     const env_acceptcommandslevel : string | undefined = process.env[env_prefix + "minUserRankForPrivilegedCommands"];
-    const env_enableLogging : boolean = process.env[env_prefix + "ENABLE_LOGGING"] === "true";
+    const env_inactivtyTimeoutMinutes : string | undefined = process.env[env_prefix + "inactivityTimeoutMinutes"];
+    const env_enableLogging : boolean = process.env[env_prefix + "enableLogging"] === "true";
 
     config.serverBaseUrl = config.serverBaseUrl || env_base_url || "";
     config.username =  config.username || env_username || "";
@@ -31,6 +33,7 @@ function readBotSettings() : Config {
     config.room = config.room || env_room || "";
     config.enableLogging = config.enableLogging || env_enableLogging;
     config.minUserRankForPrivilegedCommands = config.minUserRankForPrivilegedCommands || (env_acceptcommandslevel && parseInt(env_acceptcommandslevel)) || DEFAULT_ACCEPT_COMMANDS_AT_USER_RANK_LEVEL;
+    config.inactivityTimeoutMinutes = config.inactivityTimeoutMinutes || (env_inactivtyTimeoutMinutes && parseInt(env_inactivtyTimeoutMinutes)) || DEFAULT_INACTIVITY_TIMEOUT;
 
     return config;
 }
@@ -44,6 +47,7 @@ interface Config
     roomPassword: string,
     enableLogging: boolean
     minUserRankForPrivilegedCommands: number
+    inactivityTimeoutMinutes: number
 }
 
 interface MoveVideoResponse {
@@ -107,6 +111,7 @@ interface Context {
     moveVideoRefCounter : Map<string, true>
     isAutoSortEnabled: boolean
     userRankMap: Map<string, Rank>
+    timeoutHandle?: NodeJS.Timeout
 }
 
 
@@ -125,8 +130,6 @@ async function getSecureServer(config : Config) : Promise<string> {
     const serverList = serverJson.data as {servers :  {url : string, secure: boolean}[]};
     return serverList.servers.find(server => server.secure === true)!.url;
 }
-
-
 
 //check if config.cytubeServer is valid url 
 function validateConfiguration(config : Config) {
@@ -206,12 +209,16 @@ const commands: Command[] =
             requiresPrivledge: true,
             description: "kills the bot",
             commandImpl: (context: Context, response: ChatMsgResponse) => {
-                getEmitProxy(context)("chatMsg", { msg: "Goodbye cruel world" });
-                exit(0);
+                killBot(context);
             }
         },
     ];
 
+
+function killBot(context: Context) {
+    getEmitProxy(context)("chatMsg", { msg: "Goodbye cruel world" });
+    exit(0);
+}
 
 // should bot accept commands from user
 function isUserPrivileged(username : string, context : Context) : boolean {
@@ -239,6 +246,8 @@ function onChatMsgCallback(context: Context, response: ChatMsgResponse) {
     if(!response.msg) {
         return;
     }
+
+    resetInactivityTimeout(context);
 
     const message = response.msg.trim();
 
@@ -288,6 +297,7 @@ function printHelpCommand(context: Context, commands : Command[]) {
 }
 
 function onMoveVideoCallback(context : Context, response: MoveVideoResponse) {
+    resetInactivityTimeout(context);
     if(!context.isAutoSortEnabled) {
         return;
     }
@@ -312,6 +322,7 @@ function onMoveVideoCallback(context : Context, response: MoveVideoResponse) {
 }
 
 function onDeleteCallback(context: Context , response: { uid: number }) {
+    resetInactivityTimeout(context);
     if(!context.isAutoSortEnabled) {
         return
     }
@@ -337,6 +348,10 @@ function onErrorMsg(context : Context, response : { msg: string } ) {
 }
 
 function onQueueCallback(context: Context, response : QueueResponse) {
+    resetInactivityTimeout(context);
+    if(!context.isAutoSortEnabled) {
+        return
+    }
     if (response.after as string === "prepend") {
         context.VideoQueue.unshift(response.item);
     } else {
@@ -421,6 +436,15 @@ function onDisconnectCallback(context : Context, response : any) {
 }
 
 
+function resetInactivityTimeout(context: Context) {
+    if(context.timeoutHandle) {
+        clearTimeout(context.timeoutHandle);
+    }
+    context.timeoutHandle = setTimeout(() => { 
+        sendChatMessage(context, "Bot shutting down due to room inactivity.")
+        killBot(context);
+    }, context.Config.inactivityTimeoutMinutes * 1000 * 60)
+}
 
 
 async function main() {
@@ -439,8 +463,11 @@ async function main() {
         loginSuccess: false,
         moveVideoRefCounter: new Map<string, true>(),
         isAutoSortEnabled: true,
-        userRankMap : new Map<string, number>()
+        userRankMap : new Map<string, number>(),
     }
+
+    resetInactivityTimeout(context);
+
     const emitProxy = getEmitProxy(context);
     const onProxy = getOnProxy(context);
 
